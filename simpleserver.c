@@ -106,15 +106,15 @@ int listen_requests(int sockfd) {
 	printf("Incoming connection\n");
 	
 	// Spawn worker process to handle requests
-	int status = 0;//fork();
+	int status = fork();
 	if(status == 0) {
 		// Child process also receives a listening socket
 		// Close it..
-		//close(sockfd);
 		
 		// Connection already established when accept() returned..
 		// Handle incoming request..
 		handle_requests(connection_fd);
+		close(sockfd);
 		exit(0);
 	} else if(status < 0) {
 		// Failed to create worker process 
@@ -124,7 +124,7 @@ int listen_requests(int sockfd) {
 		return 1;
 	}
 	// Parent process no longer talks to incoming connection..
-	//close(connection_fd);
+	close(connection_fd);
 	return 0;
 }
 
