@@ -40,86 +40,21 @@ int main(int argc, char * argv[]){
 	*/
 	
 	
-	// some variables
-	int server_fd, client_fd, rc, client_addr_len, opt, rcvd, fd, bytes_read;
-	struct sockaddr_in server_addr, client_addr;
-	char client_msg[1024], *server_msg = "Hello Client\n", *http_root_path, *reqline[3], file_path[1024], data_to_send[1024];
+	// Minimal necessary variables to initialize server
+	int listening_fd;
+	struct addrinfo serverAddrInfo;
 	
 	// requires a port number to listen on and a directory path
 	if(argc != 3){
 		fprintf(stderr, "[Usage]: %s PORT ROOT_PATH\n", argv[0]);
 		exit(EXIT_FAILURE);
 	}
-	http_root_path = argv[2];
-
-	// create server address struct
-	memset(&server_addr, 0, sizeof(struct sockaddr_in));
-	server_addr.sin_family = AF_INET;
-	server_addr.sin_port = htons(atoi(argv[1]));
-	server_addr.sin_addr.s_addr = INADDR_ANY; // bind to an available IP
-
-	// open socket and check error
-	server_fd = socket(AF_INET, SOCK_STREAM, 0);
-	clean_exit(server_fd, server_fd, "[Server socket error]: ");
-
-	// allow reusable port after disconnet or termination of server
-	opt = 1;
-	rc = setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, (socklen_t)sizeof(int));
-	clean_exit(rc, server_fd, "[Server setsocket error]: ");
-
-	// bind socket to any address on machine and port and check error
-	rc = bind(server_fd, (struct sockaddr *)&server_addr, sizeof(struct sockaddr_in));
-	clean_exit(rc, server_fd, "[Server bind error]: ");
-
-	// listen on socket for up to 5 connections
-	rc = listen(server_fd, 5);
-	clean_exit(rc, server_fd, "[Server listen error]: ");
-
-	// Accept connection forever
-	printf("SERVER AT %s:%d LISTENING FOR CONNECTIONS", inet_ntoa(server_addr.sin_addr), ntohs(server_addr.sin_port));
-	while(1){
-		client_fd = accept(server_fd, (struct sockaddr *)&client_addr, (socklen_t *)&client_addr_len);
-		clean_exit(client_fd, server_fd, "[Server accept error]: ");
-		
-		// process requests
-		rcvd = recv(client_fd, client_msg, 1024, 0);
-		if(rcvd < 0) clean_exit(rc, server_fd, "[Server recv error]: ");
-		else if(rcvd == 0) clean_exit(rc, server_fd, "[Client disconnected unexpectedly]: ");
-		else{
-			// successful msg
-			reqline[0] = strtok (client_msg, " \t\n");
-			// Look if msg was a HTTP GET request
-			if (strncmp(reqline[0], "GET\0", 4) == 0){
-				reqline[1] = strtok(NULL, " \t");
-				reqline[2] = strtok(NULL, " \t\n");
-				// check if msg was using the HTTP 1.0 protocol
-				// we can expand this to include 1.1 later
-				if(strncmp(reqline[2], "HTTP/1.0", 8) != 0){
-					write(client_fd, "HTTP/1.0 400 Bad Request\n", 25);
-				}
-				else{
-					// no file was specified, provide default file
-					if(strncmp(reqline[1], "/\0" ,2) == 0){
-						reqline[1] = "/index.html";
-					}
-					strcpy(file_path, http_root_path);
-					strcpy(&file_path[strlen(http_root_path)], reqline[1]);
-					printf("file: %s\n", file_path);
-					
-					// File found, send to client
-					if((fd=open(file_path, O_RDONLY)) != -1){
-						send(client_fd, "HTTP/1.0 200 OK\n\n", 17, 0);
-						while((bytes_read=read(fd, data_to_send, 1024)) > 0){
-							write(client_fd, data_to_send, bytes_read);
-						}
-					}
-					else write(client_fd, "HTTP/1.0 404 Not Found\n", 23);	
-				}
-			}
-		}
-		
-		// close client
-		close(client_fd);
+	rootPath = argv[2];
+	
+	listening_fd = init_server(argv[1], NULL, 5, &serverAddrInfo);
+	
+	while(1) {
+		listen_requests(listening_fd);
 	}
 
 }
@@ -146,26 +81,41 @@ int read_file(const char *root, const char* path, char** out_dataPtr) {
 }
 
 int supportedMethod(const char *methodName) {
-	return (strcmp(methodName, "GET") == 0);
+	return (strncmp(methodName, "GET", 3) == 0);
 }
 
 int supportedVersion(const char *httpVersion) {
-	return (strcmp(httpVersion, "HTTP/1.0") == 0);
+	return (strncmp(httpVersion, "HTTP/1.0", 8) == 0);
 }
 
 int listen_requests(int sockfd) {
 	struct sockaddr_storage connection_addr;
 	socklen_t addr_size = sizeof connection_addr;
 	// wait for connection, accept()
-	int connection_fd = accept(sockfd, (struct sockaddr *)&connection_addr, &addr_size);
+	int connection_fd = 0;
+	
+	// Try again until get an good connection
+	while((connection_fd = accept(sockfd, (struct sockaddr *)&connection_addr, &addr_size)) <= 0) {
+		// TODO: Add error handling by checking "errno"
+		// There maybe some fatal errors
+		// switch(errno) {
+		//
+		// }
+	}
+	
+	printf("Incoming connection\n");
 	
 	// Spawn worker process to handle requests
-	int status = fork();
+	int status = 0;//fork();
 	if(status == 0) {
+		// Child process also receives a listening socket
+		// Close it..
+		//close(sockfd);
+		
 		// Connection already established when accept() returned..
 		// Handle incoming request..
 		handle_requests(connection_fd);
-		//exit(0);
+		exit(0);
 	} else if(status < 0) {
 		// Failed to create worker process 
 		perror("Failed to create worker process; memory exhaustion?");
@@ -173,6 +123,8 @@ int listen_requests(int sockfd) {
 		close(connection_fd);
 		return 1;
 	}
+	// Parent process no longer talks to incoming connection..
+	//close(connection_fd);
 	return 0;
 }
 
@@ -183,8 +135,8 @@ int recvLine(int sockfd, char *buffer) {
 		rcvd = recv(sockfd, buffer++, 1, 0);
 		++count;
 		// Return on CRLF or 0 bytes being read..
-	} while(rcvd > 0 && (*buffer != '\n' || *(buffer-1) != '\r'));
-	return count;
+	} while(rcvd > 0 && (*(buffer-1) != '\n' || *(buffer-2) != '\r'));
+	return rcvd > 0 ? count : rcvd;
 }
 
 // Normal send does not ensure it sends all data at once
@@ -208,7 +160,7 @@ int sendAll(int sockfd, const char *buffer, int size) {
 }
 
 int handle_field(int sockfd, char *key, char *value) {
-	if(strcmp(key, "???") == 0) {
+	if(strncmp(key, "???", 3) == 0) {
 		
 	} else {
 		return -1;
@@ -224,13 +176,13 @@ const char *get_file_extension(char *filename) {
 
 const char *get_mime_type(char *filename) {
 	const char* ext = get_file_extension(filename);
-	if(strcmp(ext, "js") == 0){
+	if(strncmp(ext, "js", 2) == 0){
 		return "text/javascript";
-	} else if(strcmp(ext, "css") == 0) {
+	} else if(strncmp(ext, "css", 3) == 0) {
 		return "text/css";
-	} else if(strcmp(ext, "jpg") == 0) {
+	} else if(strncmp(ext, "jpg", 3) == 0) {
 		return "image/jpeg";
-	} else if(strcmp(ext, "html") == 0) {
+	} else if(strncmp(ext, "html", 4) == 0) {
 		return "text/html";
 	} else {
 		return "text/plain";
@@ -239,8 +191,6 @@ const char *get_mime_type(char *filename) {
 
 
 int handle_requests(int sockfd) {
-#define HEADER_SIZE_LIMIT 2048
-#define BUFFER_SIZE 2048
 	int rcvdTotal = 0; // Total received..
 	int rcvd = 0;
 	int requireBody = 1;
@@ -249,14 +199,38 @@ int handle_requests(int sockfd) {
 	char *key = NULL;
 	char *value = NULL;
 	char *version = NULL;
+
+	// Print IP Address
+	socklen_t len;
+	struct sockaddr_storage addr;
+	char ipstr[INET6_ADDRSTRLEN];
+	int port;
+
+	len = sizeof addr;
+	getpeername(sockfd, (struct sockaddr*)&addr, &len);
+
+	// deal with both IPv4 and IPv6:
+	if (addr.ss_family == AF_INET) {
+		struct sockaddr_in *s = (struct sockaddr_in *)&addr;
+		port = ntohs(s->sin_port);
+		inet_ntop(AF_INET, &s->sin_addr, ipstr, sizeof ipstr);
+	} else { // AF_INET6
+		struct sockaddr_in6 *s = (struct sockaddr_in6 *)&addr;
+		port = ntohs(s->sin6_port);
+		inet_ntop(AF_INET6, &s->sin6_addr, ipstr, sizeof ipstr);
+	}
+
+	printf("Peer IP address: %s\n", ipstr);
+	// End print IP Address
 	
 	// Read first line in data until hitting CRLF
 	rcvd = recvLine(sockfd, buffer);
-	if(rcvd == 0) {
+	if(rcvd <= 0) {
 		perror("Connection closed unexpectedly or timed out");
 		close(sockfd);
 		return -1;
 	}
+	printf(" * Received: %s", buffer);
 	
 	// Split into key, value pair.
 	// Value should contain method name and HTTP version
@@ -275,43 +249,51 @@ int handle_requests(int sockfd) {
 	version = strtok(NULL, " \t\n");
 	if(!supportedVersion(version)) {
 		// Return error code 505 if version not supported..
-		sendAll(sockfd, "HTTP/1.0 505 Method Not Allowed\n", 0);
+		sendAll(sockfd, "HTTP/1.0 505 Version Not Supported\n", 0);
 		close(sockfd);
 		return -1;
 	}
 	
 	
 	// Try to find the file
-	strcpy(file_path, value);
-	strcpy(&file_path[strlen(rootPath)], value);
+	strcpy(file_path, rootPath);
+	strcpy(&file_path[strlen(rootPath)],
+			strncmp(value, "/\0" ,2) == 0 ? "/index.html" : value);
 	int fd;
 	if((fd=open(file_path, O_RDONLY)) != -1){
-		sendAll(sockfd, "HTTP/1.0 200 OK\n", 0);
+		sendAll(sockfd, "HTTP/1.0 200 OK\r\n", 0);
 		sendAll(sockfd, "content-type: ", 0);
 		sendAll(sockfd, get_mime_type(file_path), 0);
-	} else {
-		sendAll(sockfd, "HTTP/1.0 404 Not Found\n", 0);
-	}
+		sendAll(sockfd, "\r\n", 0);
 	
-	// for line in data
-	while(recvLine(sockfd, buffer) > 0) {
-		printf("%s\n", buffer);
-		key = strtok(buffer, ":\r\n");
-		value = strtok(buffer, ":\r\n");
-		
-		if(handle_field(sockfd, key, value)) {
-			// Unsupported header
-			fprintf(stderr, "Unsupported header: %s", buffer);
+		// for line in data
+		// If data read is empty line with CRLF only..
+		// Then it is end of the header
+		while((rcvd = recvLine(sockfd, buffer)) > 0 && strncmp(buffer, "\r\n", 2) != 0) {
+			buffer[rcvd] = '\0';
+			printf("%s", buffer); // Each line of valid header is guarantteed to end with CRLF
+			key = strtok(buffer, ":\r\n");
+			value = strtok(NULL, ":\r\n");
+			
+			if(handle_field(sockfd, key, value)) {
+				// Unsupported header
+				fprintf(stderr, "Unsupported header: (%s: %s)\n", key, value);
+			}
 		}
-	}
-	
-	// send response body
-	if(requireBody) {
+		
+		// End of response header
+		sendAll(sockfd, "\r\n", 0);
+		
+		// send response body
 		char fileBuffer[BUFFER_SIZE] = {0};
 		int bytes_read;
 		while((bytes_read=read(fd, fileBuffer, 1024)) > 0){
 			sendAll(sockfd, fileBuffer, bytes_read);
 		}
+		// End of response body
+		sendAll(sockfd, "\r\n", 0);
+	} else {
+		sendAll(sockfd, "HTTP/1.0 404 Not Found\n\n", 0);
 	}
 	
 	close(sockfd);
@@ -328,6 +310,7 @@ int init_server(const char *PORT, const char *ADDR, const int QUEUE_LIMIT, struc
 	struct addrinfo hints;
 	struct addrinfo *res;
 	int listening_fd;
+	int rslt = 0;
 	
 	memset(&hints, 0, sizeof hints);
 	hints.ai_family = AF_INET;  // use IPv4 or IPv6, whichever
@@ -343,11 +326,21 @@ int init_server(const char *PORT, const char *ADDR, const int QUEUE_LIMIT, struc
 	// Create socket, which prepares a connection
 	listening_fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
 	
+	// Allow socket reuse, thus not blocking port if this program fails
+	int opt = 1;
+	rslt = setsockopt(listening_fd, SOL_SOCKET, SO_REUSEADDR, &opt, (socklen_t)sizeof(int));
+	
+	// Set timeout, prevent waiting forever and "slow down" resource exhaustion
+	struct timeval timeout;
+	timeout.tv_sec = 3;
+	timeout.tv_usec = 0;
+	rslt = setsockopt(listening_fd, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout, sizeof(timeout));
+	
 	// Bind to a port and address, with the given information
-	bind(listening_fd, res->ai_addr, res->ai_addrlen);
+	rslt = bind(listening_fd, res->ai_addr, res->ai_addrlen);
 	
 	// Start listening on the specified address and port
-	listen(listening_fd, QUEUE_LIMIT);
+	rslt = listen(listening_fd, QUEUE_LIMIT);
 	
 	return listening_fd;
 }
