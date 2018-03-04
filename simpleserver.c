@@ -19,7 +19,7 @@ int supportedMethod(const char *methodName);
 int supportedVersion(const char *httpVersion);
 int listen_requests(int sockfd);
 int recvLine(int sockfd, char *buffer);
-int sendAll(int sockfd, char *buffer);
+int sendAll(int sockfd, const char *buffer, int size);
 int handle_field(int sockfd, char *key, char *value);
 const char *get_file_extension(char *filename);
 const char *get_mime_type(char *filename);
@@ -189,14 +189,16 @@ int recvLine(int sockfd, char *buffer) {
 
 // Normal send does not ensure it sends all data at once
 // This function ensures that..
+// Size <= 0 means determine the size automatically for null terminated strings
+// Otherwise only send the specified amount of bytes
 // Returns -1 if error
-int sendAll(int sockfd, char *buffer) {
-	int len = strlen(buffer);
+int sendAll(int sockfd, const char *buffer, int size) {
+	int len = size > 0 ? size : strlen(buffer);
 	int i = 0;
 	
 	// If not all bytes are sent, try to send the rest..
 	do {
-		i = send(sockfd, buffer, len - i, 0)
+		i = send(sockfd, buffer, len - i, 0);
 		buffer += i;
 		if(i <= 0) {
 			return i;
@@ -230,7 +232,7 @@ const char *get_mime_type(char *filename) {
 		return "image/jpeg";
 	} else if(strcmp(ext, "html") == 0) {
 		return "text/html";
-	} else
+	} else {
 		return "text/plain";
 	}
 }
@@ -262,7 +264,7 @@ int handle_requests(int sockfd) {
 	// Test supported method
 	// Note: Whether method is allowed on the given resource is another story
 	if(!supportedMethod(key)) {
-		sendAll(sockfd, "HTTP/1.0 405 Method Not Allowed\n");
+		sendAll(sockfd, "HTTP/1.0 405 Method Not Allowed\n", 0);
 		close(sockfd);
 		return -1;
 	}
@@ -273,7 +275,7 @@ int handle_requests(int sockfd) {
 	version = strtok(NULL, " \t\n");
 	if(!supportedVersion(version)) {
 		// Return error code 505 if version not supported..
-		sendAll(sockfd, "HTTP/1.0 505 Method Not Allowed\n");
+		sendAll(sockfd, "HTTP/1.0 505 Method Not Allowed\n", 0);
 		close(sockfd);
 		return -1;
 	}
@@ -282,31 +284,33 @@ int handle_requests(int sockfd) {
 	// Try to find the file
 	strcpy(file_path, value);
 	strcpy(&file_path[strlen(rootPath)], value);
+	int fd;
 	if((fd=open(file_path, O_RDONLY)) != -1){
-		sendAll(sockfd, "HTTP/1.0 200 OK\n");
-		sendAll(sockfd, "content-type: ");
-		sendAll(sockfd, get_mime_type(file_path));
+		sendAll(sockfd, "HTTP/1.0 200 OK\n", 0);
+		sendAll(sockfd, "content-type: ", 0);
+		sendAll(sockfd, get_mime_type(file_path), 0);
 	} else {
-		sendAll(sockfd, "HTTP/1.0 404 Not Found\n");
+		sendAll(sockfd, "HTTP/1.0 404 Not Found\n", 0);
 	}
 	
 	// for line in data
 	while(recvLine(sockfd, buffer) > 0) {
-		printf(buffer);
+		printf("%s\n", buffer);
 		key = strtok(buffer, ":\r\n");
 		value = strtok(buffer, ":\r\n");
 		
 		if(handle_field(sockfd, key, value)) {
 			// Unsupported header
-			fprintf(stderr, "Unsupported header: %f", buffer);
+			fprintf(stderr, "Unsupported header: %s", buffer);
 		}
 	}
 	
 	// send response body
 	if(requireBody) {
 		char fileBuffer[BUFFER_SIZE] = {0};
-		while((bytes_read=read(fd, data_to_send, 1024)) > 0){
-			sendAll(sockfd, data_to_send, bytes_read);
+		int bytes_read;
+		while((bytes_read=read(fd, fileBuffer, 1024)) > 0){
+			sendAll(sockfd, fileBuffer, bytes_read);
 		}
 	}
 	
