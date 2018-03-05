@@ -9,9 +9,13 @@
 #include<netdb.h>
 #include<signal.h>
 #include<fcntl.h>
+// If this is not defined, compiler will complain about strptime()
+#define __USE_XOPEN
+#include<time.h>
 
 #define HEADER_SIZE_LIMIT 2048
 #define BUFFER_SIZE 2048
+#define SPAWN_WORKER
 
 void clean_exit(int rc, int fd, char *message);
 int read_file(const char *root, const char* path, char** out_dataPtr);
@@ -105,17 +109,25 @@ int listen_requests(int sockfd) {
 	
 	printf("Incoming connection\n");
 	
+	int status = 0;
+#ifdef SPAWN_WORKER
 	// Spawn worker process to handle requests
-	int status = fork();
+	status = fork();
+#endif
 	if(status == 0) {
-		// Child process also receives a listening socket
-		// Close it..
-		
 		// Connection already established when accept() returned..
 		// Handle incoming request..
 		handle_requests(connection_fd);
+		
+#ifdef SPAWN_WORKER
+		// Child process also receives a listening socket
+		// Close it..
 		close(sockfd);
+		
+		// Terminates once finished..
+		// We don't want 2 servers running at the same time..
 		exit(0);
+#endif
 	} else if(status < 0) {
 		// Failed to create worker process 
 		perror("Failed to create worker process; memory exhaustion?");
@@ -123,8 +135,11 @@ int listen_requests(int sockfd) {
 		close(connection_fd);
 		return 1;
 	}
+		
+#ifdef SPAWN_WORKER
 	// Parent process no longer talks to incoming connection..
 	close(connection_fd);
+#endif
 	return 0;
 }
 
@@ -261,37 +276,102 @@ int handle_requests(int sockfd) {
 			strncmp(value, "/\0" ,2) == 0 ? "/index.html" : value);
 	int fd;
 	if((fd=open(file_path, O_RDONLY)) != -1){
-		sendAll(sockfd, "HTTP/1.0 200 OK\r\n", 0);
-		sendAll(sockfd, "content-type: ", 0);
-		sendAll(sockfd, get_mime_type(file_path), 0);
-		sendAll(sockfd, "\r\n", 0);
-	
+		char *Etag = NULL;
+		char *modTimeStr = NULL;
+			
 		// for line in data
 		// If data read is empty line with CRLF only..
 		// Then it is end of the header
 		while((rcvd = recvLine(sockfd, buffer)) > 0 && strncmp(buffer, "\r\n", 2) != 0) {
 			buffer[rcvd] = '\0';
 			printf("%s", buffer); // Each line of valid header is guarantteed to end with CRLF
-			key = strtok(buffer, ":\r\n");
-			value = strtok(NULL, ":\r\n");
+			char *strPtr = buffer;
+			key = strsep(&strPtr, ":");
+			value = strPtr+1;	// TODO: Check for malformed request
 			
-			if(handle_field(sockfd, key, value)) {
+			struct stat attr;
+			stat(file_path, &attr);
+			time_t modTime = attr.st_mtime;
+			if(strncmp(key, "If-Modified-Since", 17) == 0) {
+				char buf[32];
+				struct tm tm_ = *gmtime(&modTime);
+				if(!strftime(buf, sizeof buf, "%a, %d %b %Y %H:%M:%S %Z", &tm_)) {
+					fprintf(stderr, "Time conversion failed: %s\n", buf);
+					sendAll(sockfd, "HTTP/1.0 500 Internal Server Error\n\n", 0);
+					requireBody = 0;
+					break;
+				} 
+				// mktime had to be called after strftime..
+				// Since it modifies "tm_" and changes time zone
+				time_t modTimeGM = mktime(&tm_);
+				if(!strptime(value, "%a, %d %b %Y %H:%M:%S %Z", &tm_)) {
+					fprintf(stderr, "Time conversion failed: %s\n", value);
+					sendAll(sockfd, "HTTP/1.0 400 Bad Request\n\n", 0);
+					requireBody = 0;
+					break;
+				} 
+				
+				// Compute submitted time - modification time
+				time_t delta = difftime(mktime(&tm_), modTimeGM);
+				if(delta < 0) {
+					// Server resource is more recent..
+					// Send it..
+					modTimeStr = strdup(buf);
+				} else if(delta == 0) {
+					// Server resource is not more recent..
+					// No need to send again..
+					sendAll(sockfd, "HTTP/1.0 304 Not Modified\n\n", 0);
+					requireBody = 0;
+					break;
+				} else {
+					// Invalid timestamp, requested resource is more recent than server
+					sendAll(sockfd, "HTTP/1.0 404 Not Found\n\n", 0);
+					requireBody = 0;
+					break;
+				}
+			} else if(strncmp(key, "If-Match", 8) == 0) {
+				//if(strncpy(value, Etag, strlen(Etag) != 0)) {
+				//	sendAll(sockfd, "HTTP/1.0 416 Range Not Satisfiable\n\n", 0);
+				//	requireBody = 0;
+				//}
+			} else if(strncmp(key, "If-None-Match", 13) == 0) {
+				
+			} else if(strncmp(key, "If-Unmodified-Since", 19) == 0) {
+				
+			} else if(strncmp(key, "If-Range", 8) == 0) {
+				
+			} else {
 				// Unsupported header
 				fprintf(stderr, "Unsupported header: (%s: %s)\n", key, value);
 			}
 		}
 		
-		// End of response header
-		sendAll(sockfd, "\r\n", 0);
+		if(requireBody) {
+			sendAll(sockfd, "HTTP/1.0 200 OK\r\n", 0);
+			sendAll(sockfd, "content-type: ", 0);
+			sendAll(sockfd, get_mime_type(file_path), 0);
+			sendAll(sockfd, "\r\n", 0);
+			
+			if(modTimeStr) {
+				sendAll(sockfd, "Last-Modified: ", 0);
+				sendAll(sockfd, modTimeStr, 0);
+				sendAll(sockfd, "\r\n", 0);
+				free(modTimeStr);
+			}
 		
-		// send response body
-		char fileBuffer[BUFFER_SIZE] = {0};
-		int bytes_read;
-		while((bytes_read=read(fd, fileBuffer, 1024)) > 0){
-			sendAll(sockfd, fileBuffer, bytes_read);
+			// End of response header
+			sendAll(sockfd, "\r\n", 0);
+			
+			
+			// send response body
+			char fileBuffer[BUFFER_SIZE] = {0};
+			int bytes_read;
+			while((bytes_read=read(fd, fileBuffer, 1024)) > 0){
+				sendAll(sockfd, fileBuffer, bytes_read);
+			}
+			// End of response body
+			sendAll(sockfd, "\r\n", 0);
 		}
-		// End of response body
-		sendAll(sockfd, "\r\n", 0);
 	} else {
 		sendAll(sockfd, "HTTP/1.0 404 Not Found\n\n", 0);
 	}
