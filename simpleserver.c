@@ -266,6 +266,7 @@ int handle_requests(int sockfd) {
 	if(!supportedVersion(version)) {
 		// Return error code 505 if version not supported..
 		sendAll(sockfd, "HTTP/1.0 505 Version Not Supported\n", 0);
+		shutdown(sockfd, 2);
 		close(sockfd);
 		return -1;
 	}
@@ -378,6 +379,7 @@ int handle_requests(int sockfd) {
 	}
 	
 	shutdown(sockfd, 2);
+	close(sockfd);
 }
 
 // Initializes server

@@ -281,6 +281,7 @@ int handle_requests(int sockfd) {
 		// Return error code 505 if version not supported..
 		sendAll(sockfd, "HTTP/1.0 505 Version Not Supported\n", 0);
 		shutdown(sockfd, 2);
+		close(sockfd);
 		return -1;
 	}
 	
@@ -420,7 +421,10 @@ int handle_requests(int sockfd) {
 		else sendAll(sockfd, "HTTP/1.1 404 Not Found\n\n", 0);
 	}
 	
-	if(connect_token < 0) shutdown(sockfd, 2);
+	if(connect_token < 0){
+		shutdown(sockfd, 2);
+		close(sockfd);
+	}
 }
 
 // Initializes server
