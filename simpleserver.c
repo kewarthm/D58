@@ -254,6 +254,7 @@ int handle_requests(int sockfd) {
 	// Note: Whether method is allowed on the given resource is another story
 	if(!supportedMethod(key)) {
 		sendAll(sockfd, "HTTP/1.0 405 Method Not Allowed\n", 0);
+		printf("Bad method\n");
 		close(sockfd);
 		return -1;
 	}
@@ -376,7 +377,7 @@ int handle_requests(int sockfd) {
 		sendAll(sockfd, "HTTP/1.0 404 Not Found\n\n", 0);
 	}
 	
-	close(sockfd);
+	shutdown(sockfd, 2);
 }
 
 // Initializes server

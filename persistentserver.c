@@ -9,6 +9,8 @@
 #include<netdb.h>
 #include<signal.h>
 #include<fcntl.h>
+#include<netinet/in.h>
+#include<netinet/tcp.h>
 // If this is not defined, compiler will complain about strptime()
 #define __USE_XOPEN
 #include<time.h>
@@ -18,6 +20,8 @@
 #define SPAWN_WORKER
 
 void clean_exit(int rc, int fd, char *message);
+int version0(const char *httpVersion);
+int version1(const char *httpVersion);
 int read_file(const char *root, const char* path, char** out_dataPtr);
 int supportedMethod(const char *methodName);
 int supportedVersion(const char *httpVersion);
@@ -31,11 +35,6 @@ int handle_requests(int sockfd);
 int init_server(const char *PORT, const char *ADDR, const int QUEUE_LIMIT, struct addrinfo *out_serverAddrInfo);
 
 char *rootPath = NULL;
-
-/*
-	Im still leaning towards using setsockopt's keepalive as it 
-	would automatically preserve the TCP connection and probe the client
-*/
 int main(int argc, char * argv[]){
 	/*
 	int error = 0;
@@ -94,7 +93,15 @@ int supportedMethod(const char *methodName) {
 }
 
 int supportedVersion(const char *httpVersion) {
-	return (strncmp(httpVersion, "HTTP/1.0", 8) == 0 || strncmp(httpVersion, "HTTP/1.1", 8));
+	return (version0(httpVersion) || version1(httpVersion));
+}
+
+int version0(const char *httpVersion){
+	return (strncmp(httpVersion, "HTTP/1.0", 8) == 0);
+}
+
+int version1(const char *httpVersion){
+	return (strncmp(httpVersion, "HTTP/1.1", 8) == 0);
 }
 
 int listen_requests(int sockfd) {
@@ -213,6 +220,8 @@ const char *get_mime_type(char *filename) {
 int handle_requests(int sockfd) {
 	int rcvdTotal = 0; // Total received..
 	int rcvd = 0;
+	int connect_token = -1;
+	int keep_alive = 3;
 	int requireBody = 1;
 	char buffer[BUFFER_SIZE] = {0};
 	char file_path[HEADER_SIZE_LIMIT] = {0}; // TODO: Bug, root path + resource path may result index out of bound
@@ -259,6 +268,7 @@ int handle_requests(int sockfd) {
 	// Note: Whether method is allowed on the given resource is another story
 	if(!supportedMethod(key)) {
 		sendAll(sockfd, "HTTP/1.0 405 Method Not Allowed\n", 0);
+		printf("Bad method\n");
 		close(sockfd);
 		return -1;
 	}
@@ -270,7 +280,7 @@ int handle_requests(int sockfd) {
 	if(!supportedVersion(version)) {
 		// Return error code 505 if version not supported..
 		sendAll(sockfd, "HTTP/1.0 505 Version Not Supported\n", 0);
-		close(sockfd);
+		shutdown(sockfd, 2);
 		return -1;
 	}
 	
@@ -283,8 +293,7 @@ int handle_requests(int sockfd) {
 	if((fd=open(file_path, O_RDONLY)) != -1){
 		char *Etag = NULL;
 		char *modTimeStr = NULL;
-		int connect_token = -1;
-		int keep_alive = 3; // default timeout(?)	
+			
 		// for line in data
 		// If data read is empty line with CRLF only..
 		// Then it is end of the header
@@ -294,7 +303,7 @@ int handle_requests(int sockfd) {
 			char *strPtr = buffer;
 			key = strsep(&strPtr, ":");
 			value = strPtr+1;	// TODO: Check for malformed request
-			
+			if(!version0(version)) connect_token = 0;
 			struct stat attr;
 			stat(file_path, &attr);
 			time_t modTime = attr.st_mtime;
@@ -303,7 +312,11 @@ int handle_requests(int sockfd) {
 				struct tm tm_ = *gmtime(&modTime);
 				if(!strftime(buf, sizeof buf, "%a, %d %b %Y %H:%M:%S %Z", &tm_)) {
 					fprintf(stderr, "Time conversion failed: %s\n", buf);
-					sendAll(sockfd, "HTTP/1.0 500 Internal Server Error\n\n", 0);
+					if(version0(version)) sendAll(sockfd, "HTTP/1.0 500 Internal Server Error\n\n", 0);
+					else{ 
+						sendAll(sockfd, "HTTP/1.1 500 Internal Server Error\r\n", 0);
+						sendAll(sockfd, "Connection: close\n\n", 0);
+					}
 					requireBody = 0;
 					break;
 				} 
@@ -312,7 +325,8 @@ int handle_requests(int sockfd) {
 				time_t modTimeGM = mktime(&tm_);
 				if(!strptime(value, "%a, %d %b %Y %H:%M:%S %Z", &tm_)) {
 					fprintf(stderr, "Time conversion failed: %s\n", value);
-					sendAll(sockfd, "HTTP/1.0 400 Bad Request\n\n", 0);
+					if (version0(version)) sendAll(sockfd, "HTTP/1.0 400 Bad Request\n\n", 0);
+					else sendAll(sockfd, "HTTP/1.1 400 Bad Request\n\n", 0);
 					requireBody = 0;
 					break;
 				} 
@@ -326,12 +340,14 @@ int handle_requests(int sockfd) {
 				} else if(delta == 0) {
 					// Server resource is not more recent..
 					// No need to send again..
-					sendAll(sockfd, "HTTP/1.0 304 Not Modified\n\n", 0);
+					if(version0(version)) sendAll(sockfd, "HTTP/1.0 304 Not Modified\n\n", 0);
+					else sendAll(sockfd, "HTTP/1.1 304 Not Modified\n\n", 0);
 					requireBody = 0;
 					break;
 				} else {
 					// Invalid timestamp, requested resource is more recent than server
-					sendAll(sockfd, "HTTP/1.0 404 Not Found\n\n", 0);
+					if(version0(version)) sendAll(sockfd, "HTTP/1.0 404 Not Found\n\n", 0);
+					else sendAll(sockfd, "HTTP/1.1 404 Not Found\n\n", 0);
 					requireBody = 0;
 					break;
 				}
@@ -347,21 +363,29 @@ int handle_requests(int sockfd) {
 			} else if(strncmp(key, "If-Range", 8) == 0) {
 				
 			} else if(strncmp(key, "Connection", 10) == 0){
-				connection_token = (strncmp(value, "Keep-Alive", 10) == 0);
+				if (strncmp(value, "Keep-Alive", 10) == 0)connect_token = 0;
+				else connect_token = 1;
 			} else if(strncmp(key, "Keep-Alive", 10) == 0){
+				
 				keep_alive = atoi(value);
-			} else {
+			}else {
 				// Unsupported header
 				fprintf(stderr, "Unsupported header: (%s: %s)\n", key, value);
 			}
 		}
-		if(connection_token == 0){
+		if(connect_token >= 0){
 			int keepcnt = 5;
 			int keepintvl = 10;
-			setsockopt();	
+			int ka = 1;
+			if (connect_token == 0) keep_alive = 3; 
+			setsockopt(sockfd, SOL_SOCKET, SO_KEEPALIVE, &ka, sizeof(ka));
+			setsockopt(sockfd, IPPROTO_TCP, TCP_KEEPCNT, &keepcnt, sizeof(int));
+			setsockopt(sockfd, IPPROTO_TCP, TCP_KEEPIDLE, &keep_alive, sizeof(int));	
+			setsockopt(sockfd, IPPROTO_TCP, TCP_KEEPINTVL, &keepintvl, sizeof(int));
 		}
 		if(requireBody) {
-			sendAll(sockfd, "HTTP/1.0 200 OK\r\n", 0);
+			if(version0(version)) sendAll(sockfd, "HTTP/1.0 200 OK\r\n", 0);
+			else sendAll(sockfd, "HTTP/1.1 200 OK\r\n", 0);
 			sendAll(sockfd, "content-type: ", 0);
 			sendAll(sockfd, get_mime_type(file_path), 0);
 			sendAll(sockfd, "\r\n", 0);
@@ -372,7 +396,12 @@ int handle_requests(int sockfd) {
 				sendAll(sockfd, "\r\n", 0);
 				free(modTimeStr);
 			}
-		
+			if(connect_token == 0){
+				sendAll(sockfd, "Connection: keep-alive\r\n", 0);
+			}
+			else{
+				sendAll(sockfd, "Connection: close\r\n", 0);
+			}
 			// End of response header
 			sendAll(sockfd, "\r\n", 0);
 			
@@ -387,10 +416,11 @@ int handle_requests(int sockfd) {
 			sendAll(sockfd, "\r\n", 0);
 		}
 	} else {
-		sendAll(sockfd, "HTTP/1.0 404 Not Found\n\n", 0);
+		if(version0(version)) sendAll(sockfd, "HTTP/1.0 404 Not Found\n\n", 0);
+		else sendAll(sockfd, "HTTP/1.1 404 Not Found\n\n", 0);
 	}
 	
-	if(connection_token < 0) close(sockfd);
+	if(connect_token < 0) shutdown(sockfd, 2);
 }
 
 // Initializes server
