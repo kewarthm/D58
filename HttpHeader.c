@@ -181,9 +181,8 @@ char *_headerCompile(struct HTTPResponseHeader *header) {
 }
 
 void _headerRelease(struct HTTPResponseHeader *header, int isDynamic) {
-    struct field *curr = header->fields;
-    while(header->fields) {
-        curr = header->fields->next;
+    struct field *curr = NULL;
+    while(curr = header->fields) {
         header->fields = curr->next;
         free(curr);
     }
@@ -228,5 +227,8 @@ int main() {
     while(rslt = testHeader.compile(&testHeader2)) {
         printf("%s", rslt);
     }
+	
+	//testHeader.release(&testHeader, 0);
+	testHeader2.release(&testHeader2, 0);
 	
 }
