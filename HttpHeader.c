@@ -10,6 +10,35 @@
 #define HEADER_BODY_TYPE_STR    1
 #define HEADER_BODY_TYPE_FILE   2
 
+void statusCodeToStr(int statusCode, char *outBuf) {
+	switch(statusCode) {
+		case 200:
+			strcpy(outBuf, "200 OK");
+			break;
+		case 304:
+			strcpy(outBuf, "304 Not Modified");
+			break;
+		case 400:
+			strcpy(outBuf, "400 Bad Request");
+			break;
+		case 404:
+			strcpy(outBuf, "404 Not Found");
+			break;
+		case 405:
+			strcpy(outBuf, "405 Method Not Allowed");
+			break;
+		case 500:
+			strcpy(outBuf, "500 Internal Server Error");
+			break;
+		case 505:
+			strcpy(outBuf, "505 Version Not Supported");
+			break;
+		default:
+			strcpy(outBuf, "500 Internal Server Error");
+			break;
+	}
+}
+
 struct field {
 	// Each key only holds 2047 bytes + \0
 	char key[HEADER_VALUE_LENGTH];
@@ -18,24 +47,46 @@ struct field {
 };
 
 struct HTTPResponseHeader {
+	char version[16]; // Version string upto 15 characters + \0
 	short statusCode;
 	struct field *fields;
 	short bodyType;
 	void *body;
-	struct field *(*setField)(struct HTTPResponseHeader *, const char *, char *);
+	void (*setVersion)(struct HTTPResponseHeader *, const char *);
+	struct field *(*setField)(struct HTTPResponseHeader *, const char *, const char *);
 	struct field *(*getField)(struct HTTPResponseHeader *, const char *);
+	void (*setBody)(struct HTTPResponseHeader *, void *, short);
     char *(*compile)(struct HTTPResponseHeader *);
     void (*release)(struct HTTPResponseHeader *, int);
 };
 
 void headerInit(struct HTTPResponseHeader *header);
-struct field *_headerSetField(struct HTTPResponseHeader *header, const char *key, char *value);
+void _headerSetVersion(struct HTTPResponseHeader *header, const char *version);
+struct field *_headerSetField(struct HTTPResponseHeader *header, const char *key, const char *value);
 struct field *_headerGetField(struct HTTPResponseHeader *header, const char *key);
+void _headerSetBody(struct HTTPResponseHeader *header, void *body, short bodyType);
 char *_headerCompile(struct HTTPResponseHeader *header);
-void _headerRelease(struct HTTPResponseHeader *header, int dynamic);
+void _headerRelease(struct HTTPResponseHeader *header, int isDynamic);
 
 
-struct field * _headerSetField(struct HTTPResponseHeader *header, const char *key, char *value) {
+void headerInit(struct HTTPResponseHeader *header) {
+	header->setVersion = _headerSetVersion;
+    header->setField = _headerSetField;
+    header->getField = _headerGetField;
+    header->setBody = _headerSetBody;
+    header->compile = _headerCompile;
+    header->release = _headerRelease;
+    header->statusCode = 500;
+    header->fields = NULL;
+    header->bodyType = HEADER_BODY_TYPE_NONE;
+    header->body = NULL;
+}
+
+void _headerSetVersion(struct HTTPResponseHeader *header, const char *version) {
+	strncpy(header->version, version, 15);
+}
+
+struct field * _headerSetField(struct HTTPResponseHeader *header, const char *key, const char *value) {
     struct field *curr = header->fields;
     struct field **parentNext = &header->fields;
     size_t len_k = strlen(key);
@@ -48,8 +99,8 @@ struct field * _headerSetField(struct HTTPResponseHeader *header, const char *ke
         parentNext = &curr->next;
         curr = curr->next;
     }
-    
-    if(curr = malloc(sizeof(struct HTTPResponseHeader))) {
+    curr = malloc(sizeof(struct field));
+    if(curr) {
         strncpy(curr->key,   key,   HEADER_VALUE_LENGTH - HEADER_KEY_RESERVE_BYTES);
         strncpy(curr->value, value, HEADER_VALUE_LENGTH - HEADER_VAL_RESERVE_BYTES);
         curr->next = NULL;
@@ -70,6 +121,11 @@ struct field *_headerGetField(struct HTTPResponseHeader *header, const char *key
     return NULL;
 }
 
+void _headerSetBody(struct HTTPResponseHeader *header, void *data, short bodyType) {
+	header->bodyType = bodyType;
+	header->body = data;
+}
+
 char *_headerCompile(struct HTTPResponseHeader *header) {
     static struct HTTPResponseHeader *_prevHeader = NULL;
     static struct field *_prevField = NULL;
@@ -85,7 +141,12 @@ char *_headerCompile(struct HTTPResponseHeader *header) {
     if(_prevHeader) {
         char buffer[HEADER_VALUE_LENGTH * 2] = {0};
         if(!_statusCompiled) {
-            
+			strcat(buffer, header->version);
+			strcat(buffer, " ");
+            statusCodeToStr(header->statusCode, buffer + strlen(header->version) + 1);
+            strcat(buffer, "\r\n");
+			_statusCompiled = !0;
+			return strdup(buffer);
         } else if(_prevField) {
             struct field *curr = _prevField;
             strcat(buffer, curr->key);
@@ -119,7 +180,7 @@ char *_headerCompile(struct HTTPResponseHeader *header) {
     return NULL;
 }
 
-void _headerRelease(struct HTTPResponseHeader *header, int dynamic) {
+void _headerRelease(struct HTTPResponseHeader *header, int isDynamic) {
     struct field *curr = header->fields;
     while(header->fields) {
         curr = header->fields->next;
@@ -127,22 +188,12 @@ void _headerRelease(struct HTTPResponseHeader *header, int dynamic) {
         free(curr);
     }
     
-    if(dynamic) free(header);
-}
-
-void headerInit(struct HTTPResponseHeader *header) {
-    header->setField = _headerSetField;
-    header->getField = _headerGetField;
-    header->compile = _headerCompile;
-    header->release = _headerRelease;
-    header->statusCode = 500;
-    header->fields = NULL;
-    header->bodyType = HEADER_BODY_TYPE_NONE;
-    header->body = NULL;
+    if(isDynamic) free(header);
 }
 
 int main() {
     struct HTTPResponseHeader testHeader = {0};
+    struct HTTPResponseHeader testHeader2 = {0};
     struct field f0 = {"Hello", "World", 0};
     struct field f1 = {"Header1", "Value1", 0};
     struct field f2 = {"Last-Modified", "sometime", 0};
@@ -155,12 +206,27 @@ int main() {
     f2.next = &f3;
     testHeader.body = someData;
     testHeader.bodyType = HEADER_BODY_TYPE_STR;
+	strcpy(testHeader.version, "HTTP/1.0");
     
     char *rslt = NULL;
-    printf("Compiled header:\n");
+    printf("Compiled header1:\n");
     while(rslt = testHeader.compile(&testHeader)) {
         printf("%s", rslt);
     }
-    
-    
+	
+    headerInit(&testHeader2);
+	testHeader2.setVersion(&testHeader2, "HTTP/1.0");
+	testHeader2.setField(&testHeader2, "Hello", "World");
+	testHeader2.setField(&testHeader2, "Header1", "Value1");
+	testHeader2.setField(&testHeader2, "Last-Modified", "sometime");
+	testHeader2.setField(&testHeader2, "content-type", "text/plain");
+	//testHeader2.setField(&testHeader2, "Header1", "Value1-New");
+	testHeader2.setBody(&testHeader2, someData, HEADER_BODY_TYPE_STR);
+	
+	
+    printf("Compiled header2:\n");
+    while(rslt = testHeader.compile(&testHeader2)) {
+        printf("%s", rslt);
+    }
+	
 }
