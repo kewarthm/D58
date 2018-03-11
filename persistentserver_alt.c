@@ -17,7 +17,7 @@
 
 #define HEADER_SIZE_LIMIT 2048
 #define BUFFER_SIZE 2048
-//#define SPAWN_WORKER
+#define SPAWN_WORKER
 
 
 // START HTTPResponseHeader
@@ -465,6 +465,7 @@ int handle_requests(int sockfd) {
 	int keepAlive = MAX_KEEP_ALIVE; // timeout default 10 seconds
 	time_t prev_time = time(NULL);
 	time_t curr_time = time(NULL);
+	int useCount = 0;
 
 	// Print IP Address
 	socklen_t len;
@@ -494,6 +495,7 @@ int handle_requests(int sockfd) {
 		rcvd = recvLine(sockfd, buffer);
 		if(rcvd > 0) {
 			printf(" * Received: %s", buffer);
+			printf(" * Connection use count: %d\n", ++useCount);
 			
 			// Split into key, value pair.
 			// Value should contain method name and HTTP version
