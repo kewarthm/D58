@@ -363,7 +363,7 @@ int sendAll(int sockfd, const char *buffer, int size) {
 }
 
 int handle_field(char *resPath, struct HTTPResponseHeader *resp, char *key, char *value) {
-	if(strncmp(key, "If-Modified-Since", 17) == 0) {	
+	if(strncasecmp(key, "If-Modified-Since", 17) == 0) {	
 		struct stat attr;
 		stat(resPath, &attr);
 		time_t modTime = attr.st_mtime;
@@ -403,16 +403,16 @@ int handle_field(char *resPath, struct HTTPResponseHeader *resp, char *key, char
 			resp->setBody(resp, NULL, HEADER_BODY_TYPE_NONE);
 			return !0;
 		}
-	} else if(strncmp(key, "If-Match", 8) == 0) {
+	} else if(strncasecmp(key, "If-Match", 8) == 0) {
 		//if(strncpy(value, Etag, strlen(Etag) != 0)) {
 		//	sendAll(sockfd, "HTTP/1.0 416 Range Not Satisfiable\n\n", 0);
 		//	requireBody = 0;
 		//}
-	} else if(strncmp(key, "If-None-Match", 13) == 0) {
+	} else if(strncasecmp(key, "If-None-Match", 13) == 0) {
 		
-	} else if(strncmp(key, "If-Unmodified-Since", 19) == 0) {
+	} else if(strncasecmp(key, "If-Unmodified-Since", 19) == 0) {
 		
-	} else if(strncmp(key, "If-Range", 8) == 0) {
+	} else if(strncasecmp(key, "If-Range", 8) == 0) {
 		
 	} else {
 		// Unsupported header
@@ -429,13 +429,13 @@ const char *get_file_extension(char *filename) {
 
 const char *get_mime_type(char *filename) {
 	const char* ext = get_file_extension(filename);
-	if(strncmp(ext, "js", 2) == 0){
+	if(strncasecmp(ext, "js", 2) == 0){
 		return "text/javascript";
-	} else if(strncmp(ext, "css", 3) == 0) {
+	} else if(strncasecmp(ext, "css", 3) == 0) {
 		return "text/css";
-	} else if(strncmp(ext, "jpg", 3) == 0) {
+	} else if(strncasecmp(ext, "jpg", 3) == 0) {
 		return "image/jpeg";
-	} else if(strncmp(ext, "html", 4) == 0) {
+	} else if(strncasecmp(ext, "html", 4) == 0) {
 		return "text/html";
 	} else {
 		return "text/plain";
