@@ -391,18 +391,19 @@ int handle_field(char *resPath, struct HTTPResponseHeader *resp, char *key, char
 			// Server resource is more recent..
 			// Send it..
 			resp->setField(resp, "Last-Modified", buf);
-		} else if(delta == 0) {
+		} else if(delta >= 0) {
 			// Server resource is not more recent..
 			// No need to send again..
 			resp->statusCode = 304;
 			resp->setBody(resp, NULL, HEADER_BODY_TYPE_NONE);
 			return !0;
-		} else {
+		}/* else {
+			// 2018-03-10, Dennis: it appears I misread RFC, changed to returning 304 for requesting more recent resource than server
 			// Invalid timestamp, requested resource is more recent than server
 			resp->statusCode = 404;
 			resp->setBody(resp, NULL, HEADER_BODY_TYPE_NONE);
 			return !0;
-		}
+		}*/
 	} else if(strncasecmp(key, "If-Match", 8) == 0) {
 		//if(strncpy(value, Etag, strlen(Etag) != 0)) {
 		//	sendAll(sockfd, "HTTP/1.0 416 Range Not Satisfiable\n\n", 0);
