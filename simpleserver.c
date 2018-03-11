@@ -16,7 +16,7 @@
 
 #define HEADER_SIZE_LIMIT 2048
 #define BUFFER_SIZE 2048
-//#define SPAWN_WORKER
+#define SPAWN_WORKER
 
 
 // START HTTPResponseHeader
