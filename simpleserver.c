@@ -417,7 +417,6 @@ int handle_field(char *resPath, struct HTTPResponseHeader *resp, char *key, char
 	} else {
 		// Unsupported header
 		fprintf(stderr, "Unsupported header: (%s: %s)\n", key, value);
-		return !0;
 	}
 	return 0;
 }
