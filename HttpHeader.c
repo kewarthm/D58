@@ -4,6 +4,7 @@
 #include <unistd.h>
 
 #define HEADER_VALUE_LENGTH 2048
+#define HEADER_COMPILE_MAX_LENGTH 2048
 #define HEADER_KEY_RESERVE_BYTES 2
 #define HEADER_VAL_RESERVE_BYTES 3
 #define HEADER_BODY_TYPE_NONE   0
@@ -56,7 +57,7 @@ struct HTTPResponseHeader {
 	struct field *(*setField)(struct HTTPResponseHeader *, const char *, const char *);
 	struct field *(*getField)(struct HTTPResponseHeader *, const char *);
 	void (*setBody)(struct HTTPResponseHeader *, void *, short);
-    char *(*compile)(struct HTTPResponseHeader *);
+    size_t (*compile)(struct HTTPResponseHeader *, char [HEADER_COMPILE_MAX_LENGTH]);
     void (*release)(struct HTTPResponseHeader *, int);
 };
 
@@ -65,7 +66,7 @@ void _headerSetVersion(struct HTTPResponseHeader *header, const char *version);
 struct field *_headerSetField(struct HTTPResponseHeader *header, const char *key, const char *value);
 struct field *_headerGetField(struct HTTPResponseHeader *header, const char *key);
 void _headerSetBody(struct HTTPResponseHeader *header, void *body, short bodyType);
-char *_headerCompile(struct HTTPResponseHeader *header);
+size_t _headerCompile(struct HTTPResponseHeader *header, char buffer[HEADER_COMPILE_MAX_LENGTH]);
 void _headerRelease(struct HTTPResponseHeader *header, int isDynamic);
 
 
@@ -126,58 +127,66 @@ void _headerSetBody(struct HTTPResponseHeader *header, void *data, short bodyTyp
 	header->body = data;
 }
 
-char *_headerCompile(struct HTTPResponseHeader *header) {
+size_t _headerCompile(struct HTTPResponseHeader *header, char buffer[HEADER_COMPILE_MAX_LENGTH]) {
     static struct HTTPResponseHeader *_prevHeader = NULL;
     static struct field *_prevField = NULL;
     static int _statusCompiled = 0;
     static int _bodyCompiled = 0;
-    if(header && header != _prevHeader) {
+	static int _headerTerminated = 0;
+	size_t len = 0;
+    if(header) {
         _prevHeader = header;
         _prevField = header->fields;
         _statusCompiled = 0;
         _bodyCompiled = 0;
+		_headerTerminated = 0;
     }
     
     if(_prevHeader) {
-        char buffer[HEADER_VALUE_LENGTH * 2] = {0};
+		buffer[0] = '\0';
         if(!_statusCompiled) {
-			strcat(buffer, header->version);
+			strcat(buffer, _prevHeader->version);
 			strcat(buffer, " ");
-            statusCodeToStr(header->statusCode, buffer + strlen(header->version) + 1);
+            statusCodeToStr(_prevHeader->statusCode, buffer + strlen(_prevHeader->version) + 1);
             strcat(buffer, "\r\n");
+			len = strlen(buffer);
 			_statusCompiled = !0;
-			return strdup(buffer);
         } else if(_prevField) {
             struct field *curr = _prevField;
             strcat(buffer, curr->key);
             strcat(buffer, ": ");
             strcat(buffer, curr->value);
             strcat(buffer, "\r\n");
+			len = strlen(buffer);
             _prevField = curr->next;
-            return strdup(buffer);
-        } else if(header->bodyType && !_bodyCompiled) {
-            char *rslt = NULL;
-            switch(header->bodyType) {
+		} else if(!_headerTerminated) {
+			len = 2;
+			strcat(buffer, "\r\n");
+			_headerTerminated = !0;
+        } else if(_prevHeader->bodyType && !_bodyCompiled) {
+            switch(_prevHeader->bodyType) {
                 case HEADER_BODY_TYPE_STR:
-                    rslt = (char *)header->body;
+                    strcat(buffer, (char *)_prevHeader->body);
+					len = strlen(buffer);
+					_bodyCompiled = !0;
                     break;
-                case HEADER_BODY_TYPE_FILE: {
-                        size_t count = 0;
-                        size_t sizeToRead = HEADER_VALUE_LENGTH * 2 - 1;
-                        while(count = read(*((int *)header->body), buffer + count, sizeToRead) > 0) {
-                            sizeToRead -= count;
-                        }
-                        rslt = strdup(buffer);
-                    }
+                case HEADER_BODY_TYPE_FILE:
+					if(_prevHeader->body) {
+						len = read(*((int *)_prevHeader->body), buffer, HEADER_COMPILE_MAX_LENGTH);
+						if(len == 0) {
+							_bodyCompiled = !0;
+						}
+					} else {
+						fprintf(stderr, "HTTP response compile, file descriptor is null when body should be a file\n");
+					}
                     break;
                 default:
+					_bodyCompiled = !0;
                     break;
             }
-            _bodyCompiled = !0;
-            return rslt;
         }
     }
-    return NULL;
+    return len;
 }
 
 void _headerRelease(struct HTTPResponseHeader *header, int isDynamic) {
@@ -207,11 +216,12 @@ int main() {
     testHeader.bodyType = HEADER_BODY_TYPE_STR;
 	strcpy(testHeader.version, "HTTP/1.0");
     
-    char *rslt = NULL;
+    char rslt[HEADER_COMPILE_MAX_LENGTH] = {0};
     printf("Compiled header1:\n");
-    while(rslt = testHeader.compile(&testHeader)) {
+	testHeader.compile(&testHeader, rslt);
+	do {
         printf("%s", rslt);
-    }
+    } while(testHeader.compile(NULL, rslt) > 0);
 	
     headerInit(&testHeader2);
 	testHeader2.setVersion(&testHeader2, "HTTP/1.0");
@@ -224,9 +234,10 @@ int main() {
 	
 	
     printf("Compiled header2:\n");
-    while(rslt = testHeader.compile(&testHeader2)) {
+	testHeader2.compile(&testHeader2, rslt);
+	do {
         printf("%s", rslt);
-    }
+    } while(testHeader2.compile(NULL, rslt) > 0);
 	
 	//testHeader.release(&testHeader, 0);
 	testHeader2.release(&testHeader2, 0);
