@@ -9,6 +9,7 @@
 #include<netdb.h>
 #include<signal.h>
 #include<fcntl.h>
+#include<errno.h>
 // If this is not defined, compiler will complain about strptime()
 #define __USE_XOPEN
 #include<time.h>
@@ -277,7 +278,8 @@ int supportedMethod(const char *methodName) {
 }
 
 int supportedVersion(const char *httpVersion) {
-	return (strncmp(httpVersion, "HTTP/1.0", 8) == 0);
+	return(strncmp(httpVersion, "HTTP/1.0", 8) == 0
+		|| strncmp(httpVersion, "HTTP/1.1", 8) == 0);
 }
 
 int listen_requests(int sockfd) {
@@ -295,7 +297,7 @@ int listen_requests(int sockfd) {
 		// }
 	}
 	
-	printf("Incoming connection\n");
+	printf(" - Incoming connection\n");
 	
 	int status = 0;
 #ifdef SPAWN_WORKER
@@ -353,13 +355,16 @@ int sendAll(int sockfd, const char *buffer, int size) {
 	
 	// If not all bytes are sent, try to send the rest..
 	do {
-		i = send(sockfd, buffer, len - i, 0);
+		// MSG_NOSIGNAL is important, if client broke up connection
+		// Then send will yield Broken Pipe error
+		// MSG_NOSIGNAL prevents broken pipe error cause program to halt
+		i = send(sockfd, buffer, len - i, MSG_NOSIGNAL);
 		buffer += i;
 		if(i <= 0) {
 			return i;
 		}
 	} while(len - i > 0);
-	return 0;
+	return len;
 }
 
 int handle_field(char *resPath, struct HTTPResponseHeader *resp, char *key, char *value) {
@@ -417,7 +422,7 @@ int handle_field(char *resPath, struct HTTPResponseHeader *resp, char *key, char
 		
 	} else {
 		// Unsupported header
-		fprintf(stderr, "Unsupported header: (%s: %s)\n", key, value);
+		//fprintf(stderr, "Unsupported header: (%s: %s)\n", key, value);
 	}
 	return 0;
 }
@@ -455,6 +460,12 @@ int handle_requests(int sockfd) {
 	char version[8] = {0};
 	struct HTTPResponseHeader resp = {0};
 	headerInit(&resp);
+	
+#define MAX_KEEP_ALIVE	10
+	int keepAlive = MAX_KEEP_ALIVE; // timeout default 10 seconds
+	time_t prev_time = time(NULL);
+	time_t curr_time = time(NULL);
+	int useCount = 0;
 
 	// Print IP Address
 	socklen_t len;
@@ -476,105 +487,148 @@ int handle_requests(int sockfd) {
 		inet_ntop(AF_INET6, &s->sin6_addr, ipstr, sizeof ipstr);
 	}
 
-	printf("Peer IP address: %s\n", ipstr);
+	printf(" - Peer IP address: %s\n", ipstr);
 	// End print IP Address
 	
-	// Read first line in data until hitting CRLF
-	rcvd = recvLine(sockfd, buffer);
-	if(rcvd <= 0) {
-		perror("Connection closed unexpectedly or timed out");
-		close(sockfd);
-		return -1;
-	}
-	printf(" * Received: %s", buffer);
-	
-	// Split into key, value pair.
-	// Value should contain method name and HTTP version
-	key = strtok(buffer, " \t\r\n");
-	value = strtok(NULL, " \t\r\n");	// Resource path
-	strncpy(version, strtok(NULL, " \t\r\n"), 8);	// HTTP version
-	
-	// Test HTTP version
-	resp.setVersion(&resp, version);
-	if(supportedVersion(version)) {
-		// Test supported method
-		// Note: Whether method is allowed on the given resource is another story
-		if(supportedMethod(key)) {
-			// Try to find specified resource
-			strcpy(file_path, rootPath);
-			strcpy(&file_path[strlen(rootPath)],
-					strncmp(value, "/\0" ,2) == 0 ? "/index.html" : value);
-			int fd;
-			if((fd=open(file_path, O_RDONLY)) != -1){
-				char *Etag = NULL;
-				char *modTimeStr = NULL;
+	do {
+		// Read first line in data until hitting CRLF
+		rcvd = recvLine(sockfd, buffer);
+		if(rcvd > 0) {
+			printf(" * Received: %s", buffer);
+			printf(" * Connection use count: %d\n", ++useCount);
+			
+			// Split into key, value pair.
+			// Value should contain method name and HTTP version
+			key = strtok(buffer, " \t\r\n");
+			value = strtok(NULL, " \t\r\n");	// Resource path
+			strncpy(version, strtok(NULL, " \t\r\n"), 8);	// HTTP version
+			
+			// Test HTTP version
+			resp.setVersion(&resp, version);
+			if(supportedVersion(version)) {
+				// Test supported method
+				// Note: Whether method is allowed on the given resource is another story
+				if(supportedMethod(key)) {
+					// Try to find specified resource
+					strcpy(file_path, rootPath);
+					strcpy(&file_path[strlen(rootPath)],
+							strncmp(value, "/\0" ,2) == 0 ? "/index.html" : value);
+					int fd;
+					if((fd=open(file_path, O_RDONLY)) != -1){
+						char *Etag = NULL;
+						char *modTimeStr = NULL;
 
-				resp.statusCode = 200;
-				resp.setBody(&resp, &fd, HEADER_BODY_TYPE_FILE); 
-				resp.setField(&resp, "content-type", get_mime_type(file_path));
+						resp.statusCode = 200;
+						resp.setBody(&resp, &fd, HEADER_BODY_TYPE_FILE); 
+						resp.setField(&resp, "content-type", get_mime_type(file_path));
 
-				// for line in data
-				// If data read is empty line with CRLF only..
-				// Then it is end of the header
-				while((rcvd = recvLine(sockfd, buffer)) > 0 && strncmp(buffer, "\r\n", 2) != 0) {
-					buffer[rcvd] = '\0';
-					printf("%s", buffer); // Each line of valid header is guarantteed to end with CRLF
-					char *strPtr = buffer;
-					key = strsep(&strPtr, ":");
-					value = strPtr+1;	// TODO: Check for malformed request
-					
-					if (handle_field(file_path, &resp, key, value)) break;
-				}
-				
-				/*
-				if(requireBody) {
-					sendAll(sockfd, "HTTP/1.0 200 OK\r\n", 0);
-					sendAll(sockfd, "content-type: ", 0);
-					sendAll(sockfd, get_mime_type(file_path), 0);
-					sendAll(sockfd, "\r\n", 0);
-					
-					if(modTimeStr) {
-						sendAll(sockfd, "Last-Modified: ", 0);
-						sendAll(sockfd, modTimeStr, 0);
-						sendAll(sockfd, "\r\n", 0);
-						free(modTimeStr);
+						// for line in data
+						// If data read is empty line with CRLF only..
+						// Then it is end of the header
+						while((rcvd = recvLine(sockfd, buffer)) > 0 && strncmp(buffer, "\r\n", 2) != 0) {
+							buffer[rcvd] = '\0';
+							printf("%s", buffer); // Each line of valid header is guarantteed to end with CRLF
+							char *strPtr = buffer;
+							key = strsep(&strPtr, ":");
+							value = strPtr+1;	// TODO: Check for malformed request
+							
+							if (handle_field(file_path, &resp, key, value)) break;
+							
+							if(strncasecmp(key, "Connection", 10) == 0) {
+								if(strncasecmp(value, "close", 5) == 0) {
+									keepAlive = 0;
+								} // Else, keep alive
+							} else if(strncasecmp(key, "Keep-Alive", 10) == 0) {
+								int requestedKeepAlive = atoi(value);
+								if(keepAlive > 0 && requestedKeepAlive < MAX_KEEP_ALIVE) {
+									keepAlive = requestedKeepAlive;
+									printf(" * Connection left intact..\n");
+								}
+							}
+						}
+						
+						int contentLen = 0;
+						char tmp[12] = {0};
+						if(resp.bodyType == HEADER_BODY_TYPE_STR) {
+							contentLen = strlen((char *)resp.body);
+						} else if(resp.bodyType == HEADER_BODY_TYPE_FILE) {
+							struct stat attr;
+							stat(file_path, &attr);
+							contentLen = attr.st_size;
+						}
+						sprintf(tmp, "%d", contentLen);
+						resp.setField(&resp, "content-length", tmp);
+						
+						
+						/*
+						if(requireBody) {
+							sendAll(sockfd, "HTTP/1.0 200 OK\r\n", 0);
+							sendAll(sockfd, "content-type: ", 0);
+							sendAll(sockfd, get_mime_type(file_path), 0);
+							sendAll(sockfd, "\r\n", 0);
+							
+							if(modTimeStr) {
+								sendAll(sockfd, "Last-Modified: ", 0);
+								sendAll(sockfd, modTimeStr, 0);
+								sendAll(sockfd, "\r\n", 0);
+								free(modTimeStr);
+							}
+						
+							// End of response header
+							sendAll(sockfd, "\r\n", 0);
+							
+							
+							// send response body
+							char fileBuffer[BUFFER_SIZE] = {0};
+							int bytes_read;
+							while((bytes_read=read(fd, fileBuffer, 1024)) > 0){
+								sendAll(sockfd, fileBuffer, bytes_read);
+							}
+							// End of response body
+							sendAll(sockfd, "\r\n", 0);
+						}
+						*/
+					} else {
+						fprintf(stderr, "Cannot find specified resource: %s\n", file_path);
+						resp.statusCode = 404;
 					}
-				
-					// End of response header
-					sendAll(sockfd, "\r\n", 0);
 					
-					
-					// send response body
-					char fileBuffer[BUFFER_SIZE] = {0};
-					int bytes_read;
-					while((bytes_read=read(fd, fileBuffer, 1024)) > 0){
-						sendAll(sockfd, fileBuffer, bytes_read);
-					}
-					// End of response body
-					sendAll(sockfd, "\r\n", 0);
+				} else {
+					// Return error code 405 if method not supported..
+					fprintf(stderr, "Unsupported method: %s\n", key);
+					resp.statusCode = 405;
 				}
-				*/
 			} else {
-				fprintf(stderr, "Cannot find specified resource: %s\n", file_path);
-				resp.statusCode = 404;
+				// Return error code 505 if version not supported..
+				fprintf(stderr, "Unsupported version: %s\n", version);
+				resp.statusCode = 505;
 			}
 			
-		} else {
-			// Return error code 405 if method not supported..
-			fprintf(stderr, "Unsupported method: %s\n", key);
-			resp.statusCode = 405;
+			char compiledStrBuffer[HEADER_COMPILE_MAX_LENGTH] = {0};
+			size_t bytesCompiled = resp.compile(&resp, compiledStrBuffer);
+			do {
+				int bytesSent = sendAll(sockfd, compiledStrBuffer, bytesCompiled);
+				if(bytesSent <= 0) {
+					if(errno == EPIPE) {
+						perror("Connection aborted");
+					} else {
+						fprintf(stderr, "Connection aborted, bytesSent = %d, errno = %d", bytesSent, errno);
+					}
+					keepAlive = -1;
+					break;
+				}
+			} while(bytesCompiled = resp.compile(NULL, compiledStrBuffer));
 		}
-	} else {
-		// Return error code 505 if version not supported..
-		fprintf(stderr, "Unsupported version: %s\n", version);
-		resp.statusCode = 505;
-	}
+		
+		// Update keepAlive counter..
+		curr_time = time(NULL);
+		keepAlive -= curr_time - prev_time;
+		prev_time = curr_time;
+	} while(keepAlive > 0 && strncasecmp(version, "HTTP/1.0", 8) != 0);
 	
-	char compiledStrBuffer[HEADER_COMPILE_MAX_LENGTH] = {0};
-	size_t bytesCompiled = resp.compile(&resp, compiledStrBuffer);
-	do {
-		sendAll(sockfd, compiledStrBuffer, bytesCompiled);
-    } while(bytesCompiled = resp.compile(NULL, compiledStrBuffer));
+	if(rcvd <= 0 && keepAlive <= 0) {		
+		perror("Connection timed out");
+	}
 	
 	shutdown(sockfd, SHUT_WR);
 	close(sockfd);
