@@ -1,0 +1,32 @@
+simpleserver.c:236:1: error: expected identifier or ‘(’ before ‘}’ token
+ }
+ ^
+simpleserver.c: In function ‘handle_requests’:
+simpleserver.c:285:6: error: ‘fd’ undeclared (first use in this function)
+  if((fd=open(file_path, O_RDONLY)) != -1){
+      ^
+simpleserver.c:285:6: note: each undeclared identifier is reported only once for each function it appears in
+simpleserver.c:288:19: warning: passing argument 2 of ‘sendAll’ discards ‘const’ qualifier from pointer target type [-Wdiscarded-qualifiers]
+   sendAll(sockfd, get_mime_type(file_path));
+                   ^
+simpleserver.c:193:5: note: expected ‘char *’ but argument is of type ‘const char *’
+ int sendAll(int sockfd, char *buffer) {
+     ^
+simpleserver.c:295:10: warning: format not a string literal and no format arguments [-Wformat-security]
+   printf(buffer);
+          ^
+simpleserver.c:301:20: warning: format ‘%f’ expects argument of type ‘double’, but argument 3 has type ‘char *’ [-Wformat=]
+    fprintf(stderr, "Unsupported header: %f", buffer);
+                    ^
+simpleserver.c:308:10: error: ‘bytes_read’ undeclared (first use in this function)
+   while((bytes_read=read(fd, data_to_send, 1024)) > 0){
+          ^
+simpleserver.c:308:30: error: ‘data_to_send’ undeclared (first use in this function)
+   while((bytes_read=read(fd, data_to_send, 1024)) > 0){
+                              ^
+simpleserver.c:309:4: error: too many arguments to function ‘sendAll’
+    sendAll(sockfd, data_to_send, bytes_read);
+    ^
+simpleserver.c:193:5: note: declared here
+ int sendAll(int sockfd, char *buffer) {
+     ^
