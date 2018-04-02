@@ -2,7 +2,6 @@
 
 #include "server.h"
 #include "packet.h"
-
 // Routing entry must be sorted by range_bits, in ascending order..
 // Where most specific (least range_bits) are at front
 struct routing_entry {
@@ -12,16 +11,17 @@ struct routing_entry {
     // Mapping 1.0.0.*
     int ip;
     int port; // Actually a sockfd
+    int cost; // Cost to reach ip (with uniform links this is just # of hops)
     signed char range_bits;
     struct routing_entry* next;
 };
 
 struct routing_entry* rtable = NULL;
-void rtable_insert(int ip, int port, signed char range);
+void rtable_insert(int ip, int port, signed char range, int cost);
 struct routing_entry *rtable_get_route(int ip);
 int rtable_size();
 char *rtable_dump();
-
+void update(char *advert);
 
 int router_listen_thread(struct cscd58w18_server *server, int connection_fd);
 
@@ -32,23 +32,24 @@ int main(int argc, char *argv[]) {
 		printf("usage: router actual_ip virtual_ip\n");
 		return 0;
 	}
-    
+    	update("update\n255.255.255.255\t123\t8\t3\n250.155.156.95\t123\t8\t4");
 	virtual_ip = argv[2];
-    struct cscd58w18_server server = {0};
-    server_init(&server, argv[1]);
+    	struct cscd58w18_server server = {0};
+    	server_init(&server, argv[1]);
 	server.connection_handler = router_listen_thread;
-    server.start(&server);
+    	server.start(&server);
     
 	//router_listen_thread(&server, connection_fd);
 	while(1) {}
 }
 
-void rtable_insert(int ip, int port, signed char range) {
+void rtable_insert(int ip, int port, signed char range, int cost) {
 	// Create new entry
 	struct routing_entry *new_entry = malloc(sizeof(struct routing_entry));
 	new_entry->ip = ip;
-    new_entry->port = port;
-    new_entry->range_bits = range;
+    	new_entry->port = port;
+    	new_entry->range_bits = range;
+	new_entry->cost = cost;
 	new_entry->next = NULL;
 	
 	// Insertion
@@ -75,12 +76,12 @@ void rtable_insert(int ip, int port, signed char range) {
 			it_ptr = it_ptr->next;
 		}
 		
-		// Already have this ip in table
+		/*// Already have this ip in table
 		if(it_ptr_prev->range_bits == range && it_ptr_prev->ip == ip) {
 			// Update entry
 			it_ptr_prev->port = new_entry->port;
 		}
-		
+		*/
 		if(it_ptr == rtable) {
 			new_entry->next = rtable;
 			rtable = new_entry;
@@ -110,6 +111,83 @@ int rtable_size() {
 		++count; it_ptr = it_ptr->next; 
 	}
 	return count;
+}
+
+
+/*
+	Advertise 
+	Package routing table into a advertisement message
+	
+*/
+struct cscd58w18_packet *advertise(){
+	char *bcast;
+	struct routing_entry* routing_table;
+	struct cscd58w18_packet *pkt_bcast;
+	pkt_bcast->ip_src = ip_to_int(virtual_ip);
+	pkt_bcast->ip_dest = ip_to_int("255.255.255.255");
+	pkt_bcast->hop_limit = 0;
+	pkt_bcast->flags_and_protocol = 1;
+	// Convert routing table into a payload to send
+	if(rtable){
+		strcpy(bcast, "update\n");
+		sprintf(bcast, "%d", rtable->ip);
+		strcpy(bcast, "\t");
+		sprintf(bcast, "%d", rtable->port);
+		strcpy(bcast, "\t");
+		sprintf(bcast, "%d", rtable->cost);
+		routing_table = rtable->next;
+		while(routing_table){
+			strcpy(bcast, "\n");
+			sprintf(bcast, "%d", rtable->ip);
+			strcpy(bcast, "\t");
+			sprintf(bcast, "%d", rtable->port);
+			strcpy(bcast, "\t");
+			sprintf(bcast, "%d", rtable->range_bits);
+			strcpy(bcast, "\t");
+			sprintf(bcast, "%d", rtable->cost);
+			routing_table = routing_table->next;
+		}
+		//Load Payload and send
+		pkt_bcast->payload = &bcast;
+		return pkt_bcast;
+	}
+	else return NULL;
+}
+
+/*
+	Update 
+	Given advertisement message 
+	Parse message and update routing table accordingly
+*/
+void update(char *advert){
+	int ip = 0;
+	int port = 0;
+	int range = 0;	
+	int cost = 0;
+	char *entry;
+	char *table = strtok("\n", advert); // should start with update as a header
+	table = strtok(NULL, advert); // should be first entry of the routing table
+	while (table != NULL){
+		printf("%s\n", table);
+		entry = strtok("\t", table);
+		while(entry != NULL){
+			//end system ip
+
+			entry = strtok(NULL, table);
+			//port
+			
+			entry = strtok(NULL, table);
+			// bit range
+
+			entry = strtok(NULL, table);
+			// cost
+			// increment cost as needed
+			
+			entry = strtok(NULL, table);
+		}
+		//rtable_insert(ip, port, range, cost);
+	}
+
 }
 
 char *rtable_dump() {
@@ -159,7 +237,7 @@ int router_listen_thread(struct cscd58w18_server *server, int connection_fd) {
 	
 	// Insert to routing table
 	// port param we passed in is actually a sockfd
-	rtable_insert(pkt_bcast.ip_src, connection_fd, 0);
+	rtable_insert(pkt_bcast.ip_src, connection_fd, 0, 1);
     
 	char ip_str[INET6_ADDRSTRLEN] = {0};
 	char payload_buffer[CSCD58W18_PACKET_PAYLOAD_LIMIT + 1] = {0};
@@ -184,10 +262,10 @@ int router_listen_thread(struct cscd58w18_server *server, int connection_fd) {
 			struct cscd58w18_end_point outgoing_node = {0};
 			if(pkt_data.ip_dest == (~0)) {
 				// Is this a broadcast?
-				rtable_insert(pkt_data.ip_src, connection_fd, 0);
+				rtable_insert(pkt_data.ip_src, connection_fd, 0, 1);
 				// For each broadcast, rtable is updated..
 				// Need advertise to neighbor routers
-				
+				advertise();
 			} else if(pkt_data.ip_dest == ip_to_int(virtual_ip) && PACKET_PROTOCOL(&pkt_data) == CSCD58W18_PACKET_PROTOCOL_ROUTER_CTRL) {
 				// This is a command sent to this server
 				if(strncmp("print_forwarding_table", pkt_data.payload, 22) == 0) {
@@ -202,8 +280,8 @@ int router_listen_thread(struct cscd58w18_server *server, int connection_fd) {
 					outgoing_node.sockfd = connection_fd; // Send to whoever asked for it
 					free(dump);
 				//} else if(strncmp("set_forwarding_table", pkt_data->payload, 20) == 0) {
-				//} else if(strncmp("advertise", pkt_data->payload, 20) == 0) {
-				//} else if(strncmp("update", pkt_data->payload, 20) == 0) {
+				//} else if(strncmp("advertise", pkt_data->payload, 9) == 0) {
+				//} else if(strncmp("update", pkt_data->payload, 6) == 0) {
 				} else {
 					printf("Message for router: %s\n", (char *)pkt_data.payload);
 				}
